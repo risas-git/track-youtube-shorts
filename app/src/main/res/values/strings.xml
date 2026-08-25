@@ -1,0 +1,21 @@
+<resources>
+    <string name="app_name">Shorts Tracker</string>
+    <string name="accessibility_service_name">Edge YouTube Shorts Tracker Service</string>
+    <string name="accessibility_service_description">Monitors Microsoft Edge URL bar to track YouTube Shorts viewing time and syncs data to Supabase.</string>
+    
+    <string name="service_status_title">Service Status</string>
+    <string name="service_enabled">Accessibility Service is ACTIVE</string>
+    <string name="service_disabled">Accessibility Service is DISABLED</string>
+    <string name="btn_enable_service">Open Accessibility Settings</string>
+    
+    <string name="supabase_settings_title">Supabase Configuration</string>
+    <string name="hint_supabase_url">Supabase Project URL (https://xxxx.supabase.co)</string>
+    <string name="hint_supabase_key">Supabase Anon Key</string>
+    <string name="hint_device_id">Device Identifier (e.g. Pixel 8)</string>
+    <string name="btn_save_settings">Save Settings</string>
+    <string name="btn_test_connection">Test Connection</string>
+    
+    <string name="live_logs_title">Live Session Activity</string>
+    <string name="btn_clear_logs">Clear Logs</string>
+    <string name="no_sessions_yet">No Shorts tracked yet. Open Edge and watch a YouTube Short!</string>
+</resources>
