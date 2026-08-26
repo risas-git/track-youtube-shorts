@@ -3560,6 +3560,7 @@ id transition_position
 id transition_scene_layoutid_cache
 id transition_transform
 id triangle
+id tvChannelAndId
 id tvDiagActiveShort
 id tvDiagEvents
 id tvDiagPackage
@@ -3568,8 +3569,8 @@ id tvEmptyLogs
 id tvServiceStatus
 id tvSyncStatus
 id tvTimestamp
+id tvTitle
 id tvUrl
-id tvVideoId
 id unchecked
 id uniform
 id unlabeled

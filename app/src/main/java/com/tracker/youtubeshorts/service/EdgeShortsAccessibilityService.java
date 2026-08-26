@@ -16,6 +16,7 @@ import android.view.accessibility.AccessibilityWindowInfo;
 import com.tracker.youtubeshorts.model.ShortSession;
 import com.tracker.youtubeshorts.network.SupabaseClient;
 import com.tracker.youtubeshorts.network.SupabaseConfig;
+import com.tracker.youtubeshorts.network.YouTubeMetadataHelper;
 
 import java.util.Arrays;
 import java.util.HashSet;
@@ -26,7 +27,8 @@ import java.util.regex.Pattern;
 
 /**
  * Enhanced AccessibilityService that monitors Microsoft Edge (and Chromium browsers)
- * for YouTube Shorts, tracks active watch time, and sends data to Supabase.
+ * for YouTube Shorts, tracks active watch time per individual Short, fetches video titles,
+ * and syncs session records to Supabase.
  */
 public class EdgeShortsAccessibilityService extends AccessibilityService {
 
@@ -71,6 +73,8 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
     public static final String ACTION_DIAGNOSTIC_UPDATE = "com.tracker.youtubeshorts.ACTION_DIAGNOSTIC_UPDATE";
 
     public static final String EXTRA_VIDEO_ID = "extra_video_id";
+    public static final String EXTRA_TITLE = "extra_title";
+    public static final String EXTRA_CHANNEL = "extra_channel";
     public static final String EXTRA_URL = "extra_url";
     public static final String EXTRA_DURATION = "extra_duration";
     public static final String EXTRA_STARTED_AT = "extra_started_at";
@@ -81,11 +85,14 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
     public static final String EXTRA_DIAG_PACKAGE = "extra_diag_package";
     public static final String EXTRA_DIAG_URL = "extra_diag_url";
     public static final String EXTRA_DIAG_ACTIVE_ID = "extra_diag_active_id";
+    public static final String EXTRA_DIAG_ACTIVE_TITLE = "extra_diag_active_title";
     public static final String EXTRA_DIAG_ACTIVE_SEC = "extra_diag_active_sec";
     public static final String EXTRA_DIAG_EVENT_COUNT = "extra_diag_event_count";
 
     // Active session state
     private String currentVideoId = null;
+    private String currentTitle = null;
+    private String currentChannelName = null;
     private String currentFullUrl = null;
     private long sessionStartTimeMillis = 0L;
     private long totalEventsReceived = 0;
@@ -111,7 +118,6 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
         super.onServiceConnected();
         Log.i(TAG, "EdgeShortsAccessibilityService connected!");
 
-        // Dynamically request enhanced web accessibility flags
         try {
             AccessibilityServiceInfo info = getServiceInfo();
             if (info != null) {
@@ -122,7 +128,7 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
                 setServiceInfo(info);
             }
         } catch (Exception e) {
-            Log.w(TAG, "Could not set enhanced flags dynamically: " + e.getMessage());
+            Log.w(TAG, "Could not set enhanced flags: " + e.getMessage());
         }
     }
 
@@ -144,10 +150,10 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
             return;
         }
 
-        // Check text/contentDescription directly on event
+        // Check text / contentDescription directly on event
         checkEventTextForShorts(event);
 
-        // Debounce active window inspection (250ms)
+        // Debounce window inspection
         if (pendingInspectionTask != null) {
             mainHandler.removeCallbacks(pendingInspectionTask);
         }
@@ -182,13 +188,9 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
         }
     }
 
-    /**
-     * Inspects active window and all interactive windows.
-     */
     private void inspectWindowsForShorts() {
         boolean foundInActive = false;
 
-        // Try primary root in active window
         AccessibilityNodeInfo rootNode = getRootInActiveWindow();
         if (rootNode != null) {
             try {
@@ -201,7 +203,6 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
             }
         }
 
-        // If not found in primary window, inspect all interactive windows
         if (!foundInActive && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
             try {
                 List<AccessibilityWindowInfo> windows = getWindows();
@@ -226,9 +227,6 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
         }
     }
 
-    /**
-     * Searches a node tree using known URL bar IDs and recursive DFS.
-     */
     private String extractShortsFromNodeTree(AccessibilityNodeInfo root) {
         if (root == null) return null;
 
@@ -297,9 +295,6 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
         return null;
     }
 
-    /**
-     * Matches raw text against all Shorts patterns to extract Video ID.
-     */
     private String extractVideoId(String text) {
         if (text == null || text.isEmpty()) return null;
 
@@ -322,16 +317,29 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
             return;
         }
 
-        // Finalize previous Short if active
+        // Finalize previous Short session
         if (currentVideoId != null) {
             finalizeCurrentSession("Swiped to next Short: " + videoId);
         }
 
+        // Start new Short session
         currentVideoId = videoId;
         currentFullUrl = normalizeShortsUrl(videoId, rawUrl);
         sessionStartTimeMillis = now;
+        currentTitle = "Loading title...";
+        currentChannelName = null;
 
         Log.i(TAG, ">>> TRACKING SHORT: " + videoId + " (" + currentFullUrl + ")");
+
+        // Fetch official video metadata asynchronously
+        YouTubeMetadataHelper.fetchVideoMetadata(videoId, info -> {
+            if (videoId.equals(currentVideoId)) {
+                currentTitle = info.title;
+                currentChannelName = info.channelName;
+                broadcastDiagnosticUpdate();
+            }
+        });
+
         broadcastDiagnosticUpdate();
     }
 
@@ -345,10 +353,15 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
         int durationSeconds = (int) (durationMillis / 1000);
 
         String finishedVideoId = currentVideoId;
+        String finishedTitle = currentTitle;
+        String finishedChannel = currentChannelName;
         String finishedUrl = currentFullUrl;
         long startTimeMillis = sessionStartTimeMillis;
 
+        // Reset state
         currentVideoId = null;
+        currentTitle = null;
+        currentChannelName = null;
         currentFullUrl = null;
         sessionStartTimeMillis = 0L;
 
@@ -361,36 +374,47 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
         }
 
         String deviceId = SupabaseConfig.getDeviceId(this);
-        ShortSession session = new ShortSession(
-                finishedVideoId,
-                finishedUrl,
-                durationSeconds,
-                startTimeMillis,
-                endTimeMillis,
-                deviceId
-        );
 
-        // Upload to Supabase
-        SupabaseClient.getInstance().insertShortSession(this, session, new SupabaseClient.ApiCallback() {
-            @Override
-            public void onSuccess(String responseBody) {
-                broadcastSessionLogged(session, true, null);
-            }
+        // Fetch final metadata before inserting if title was still loading
+        YouTubeMetadataHelper.fetchVideoMetadata(finishedVideoId, info -> {
+            String titleToSave = (info.title != null && !info.title.contains("Loading")) ? info.title : finishedTitle;
+            String channelToSave = info.channelName != null ? info.channelName : finishedChannel;
 
-            @Override
-            public void onFailure(String errorMessage) {
-                broadcastSessionLogged(session, false, errorMessage);
-            }
+            ShortSession session = new ShortSession(
+                    finishedVideoId,
+                    titleToSave,
+                    channelToSave,
+                    finishedUrl,
+                    durationSeconds,
+                    startTimeMillis,
+                    endTimeMillis,
+                    deviceId
+            );
+
+            // Upload to Supabase
+            SupabaseClient.getInstance().insertShortSession(EdgeShortsAccessibilityService.this, session, new SupabaseClient.ApiCallback() {
+                @Override
+                public void onSuccess(String responseBody) {
+                    broadcastSessionLogged(session, true, null);
+                }
+
+                @Override
+                public void onFailure(String errorMessage) {
+                    broadcastSessionLogged(session, false, errorMessage);
+                }
+            });
+
+            // Broadcast immediate local update
+            broadcastSessionLogged(session, false, "Uploading to Supabase...");
+            broadcastDiagnosticUpdate();
         });
-
-        // Broadcast local update
-        broadcastSessionLogged(session, false, "Uploading to Supabase...");
-        broadcastDiagnosticUpdate();
     }
 
     private void broadcastSessionLogged(ShortSession session, boolean synced, String errorMsg) {
         Intent intent = new Intent(ACTION_SESSION_LOGGED);
         intent.putExtra(EXTRA_VIDEO_ID, session.getVideoId());
+        intent.putExtra(EXTRA_TITLE, session.getTitle());
+        intent.putExtra(EXTRA_CHANNEL, session.getChannelName());
         intent.putExtra(EXTRA_URL, session.getUrl());
         intent.putExtra(EXTRA_DURATION, session.getDurationSeconds());
         intent.putExtra(EXTRA_STARTED_AT, session.getStartedAt());
@@ -406,6 +430,7 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
         intent.putExtra(EXTRA_DIAG_PACKAGE, lastSeenPackage);
         intent.putExtra(EXTRA_DIAG_URL, lastScannedUrl);
         intent.putExtra(EXTRA_DIAG_ACTIVE_ID, currentVideoId != null ? currentVideoId : "None (Idle)");
+        intent.putExtra(EXTRA_DIAG_ACTIVE_TITLE, currentTitle != null ? currentTitle : "");
         int activeSec = currentVideoId != null && sessionStartTimeMillis > 0
                 ? (int) ((System.currentTimeMillis() - sessionStartTimeMillis) / 1000)
                 : 0;

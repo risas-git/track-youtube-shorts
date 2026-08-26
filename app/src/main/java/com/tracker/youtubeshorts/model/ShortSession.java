@@ -15,6 +15,12 @@ public class ShortSession {
     @SerializedName("video_id")
     private final String videoId;
 
+    @SerializedName("title")
+    private String title;
+
+    @SerializedName("channel_name")
+    private String channelName;
+
     @SerializedName("url")
     private final String url;
 
@@ -34,8 +40,10 @@ public class ShortSession {
     private transient boolean isSynced;
     private transient String syncError;
 
-    public ShortSession(String videoId, String url, int durationSeconds, long startTimeMillis, long endTimeMillis, String deviceId) {
+    public ShortSession(String videoId, String title, String channelName, String url, int durationSeconds, long startTimeMillis, long endTimeMillis, String deviceId) {
         this.videoId = videoId;
+        this.title = (title != null && !title.isEmpty()) ? title : "YouTube Short (" + videoId + ")";
+        this.channelName = channelName;
         this.url = url;
         this.durationSeconds = durationSeconds;
         this.startedAt = formatIso8601(startTimeMillis);
@@ -52,6 +60,22 @@ public class ShortSession {
 
     public String getVideoId() {
         return videoId;
+    }
+
+    public String getTitle() {
+        return title != null ? title : "YouTube Short (" + videoId + ")";
+    }
+
+    public void setTitle(String title) {
+        this.title = title;
+    }
+
+    public String getChannelName() {
+        return channelName;
+    }
+
+    public void setChannelName(String channelName) {
+        this.channelName = channelName;
     }
 
     public String getUrl() {

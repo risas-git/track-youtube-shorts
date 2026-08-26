@@ -64,7 +64,8 @@ public class SessionLogAdapter extends RecyclerView.Adapter<SessionLogAdapter.Lo
 
     static class LogViewHolder extends RecyclerView.ViewHolder {
 
-        private final TextView tvVideoId;
+        private final TextView tvTitle;
+        private final TextView tvChannelAndId;
         private final TextView tvDuration;
         private final TextView tvUrl;
         private final TextView tvTimestamp;
@@ -72,7 +73,8 @@ public class SessionLogAdapter extends RecyclerView.Adapter<SessionLogAdapter.Lo
 
         public LogViewHolder(@NonNull View itemView) {
             super(itemView);
-            tvVideoId = itemView.findViewById(R.id.tvVideoId);
+            tvTitle = itemView.findViewById(R.id.tvTitle);
+            tvChannelAndId = itemView.findViewById(R.id.tvChannelAndId);
             tvDuration = itemView.findViewById(R.id.tvDuration);
             tvUrl = itemView.findViewById(R.id.tvUrl);
             tvTimestamp = itemView.findViewById(R.id.tvTimestamp);
@@ -82,11 +84,29 @@ public class SessionLogAdapter extends RecyclerView.Adapter<SessionLogAdapter.Lo
         @SuppressLint("SetTextI18n")
         public void bind(ShortSession session) {
             Context context = itemView.getContext();
-            tvVideoId.setText("Short: " + session.getVideoId());
+
+            // Set Title
+            String title = session.getTitle();
+            tvTitle.setText(title != null && !title.isEmpty() ? title : "YouTube Short (" + session.getVideoId() + ")");
+
+            // Set Channel and ID
+            String channel = session.getChannelName();
+            if (channel != null && !channel.isEmpty()) {
+                tvChannelAndId.setText(channel + " • ID: " + session.getVideoId());
+            } else {
+                tvChannelAndId.setText("Short ID: " + session.getVideoId());
+            }
+
+            // Duration
             tvDuration.setText(session.getDurationSeconds() + "s");
+
+            // URL
             tvUrl.setText(session.getUrl());
+
+            // Timestamp
             tvTimestamp.setText(formatTimeDisplay(session.getStartedAt(), session.getEndedAt()));
 
+            // Sync Status
             if (session.isSynced()) {
                 tvSyncStatus.setText("✓ Supabase Synced");
                 tvSyncStatus.setTextColor(ContextCompat.getColor(context, R.color.status_green));
@@ -101,7 +121,6 @@ public class SessionLogAdapter extends RecyclerView.Adapter<SessionLogAdapter.Lo
 
         private String formatTimeDisplay(String startIso, String endIso) {
             try {
-                // Shorten ISO strings (e.g. 2026-08-25T19:40:12.345Z -> 19:40:12)
                 String startPart = startIso.substring(startIso.indexOf('T') + 1, startIso.indexOf('.'));
                 String endPart = endIso.substring(endIso.indexOf('T') + 1, endIso.indexOf('.'));
                 return startPart + " - " + endPart + " UTC";

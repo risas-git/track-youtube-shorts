@@ -192,7 +192,7 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public void onFailure(String errorMessage) {
-                // Keep local logs if offline
+                // Keep current items if offline
             }
         });
     }
@@ -251,6 +251,8 @@ public class MainActivity extends AppCompatActivity {
                 if (intent == null) return;
 
                 String videoId = intent.getStringExtra(EdgeShortsAccessibilityService.EXTRA_VIDEO_ID);
+                String title = intent.getStringExtra(EdgeShortsAccessibilityService.EXTRA_TITLE);
+                String channel = intent.getStringExtra(EdgeShortsAccessibilityService.EXTRA_CHANNEL);
                 String url = intent.getStringExtra(EdgeShortsAccessibilityService.EXTRA_URL);
                 int duration = intent.getIntExtra(EdgeShortsAccessibilityService.EXTRA_DURATION, 0);
                 boolean isSynced = intent.getBooleanExtra(EdgeShortsAccessibilityService.EXTRA_SYNCED, false);
@@ -259,6 +261,8 @@ public class MainActivity extends AppCompatActivity {
                 if (videoId != null) {
                     ShortSession session = new ShortSession(
                             videoId,
+                            title,
+                            channel,
                             url,
                             duration,
                             System.currentTimeMillis(),
@@ -291,6 +295,7 @@ public class MainActivity extends AppCompatActivity {
 
                 String pkg = intent.getStringExtra(EdgeShortsAccessibilityService.EXTRA_DIAG_PACKAGE);
                 String activeId = intent.getStringExtra(EdgeShortsAccessibilityService.EXTRA_DIAG_ACTIVE_ID);
+                String activeTitle = intent.getStringExtra(EdgeShortsAccessibilityService.EXTRA_DIAG_ACTIVE_TITLE);
                 int activeSec = intent.getIntExtra(EdgeShortsAccessibilityService.EXTRA_DIAG_ACTIVE_SEC, 0);
                 long events = intent.getLongExtra(EdgeShortsAccessibilityService.EXTRA_DIAG_EVENT_COUNT, 0);
 
@@ -299,7 +304,10 @@ public class MainActivity extends AppCompatActivity {
                 }
                 if (activeId != null) {
                     if (!activeId.contains("None") && activeSec > 0) {
-                        tvDiagActiveShort.setText("Currently Tracking: " + activeId + " (" + activeSec + "s)");
+                        String display = (activeTitle != null && !activeTitle.isEmpty())
+                                ? activeTitle + " (" + activeSec + "s)"
+                                : activeId + " (" + activeSec + "s)";
+                        tvDiagActiveShort.setText("Currently Tracking: " + display);
                         tvDiagActiveShort.setTextColor(ContextCompat.getColor(MainActivity.this, R.color.status_green));
                     } else {
                         tvDiagActiveShort.setText("Currently Tracking: " + activeId);
