@@ -29,7 +29,7 @@ import java.util.regex.Pattern;
 /**
  * Universal AccessibilityService for YouTube Shorts in Microsoft Edge & Chromium browsers.
  * Accurately tracks YouTube Shorts via video IDs and verified creator handles (@channel).
- * Eliminates false positives from browser menus, translation popups, and non-Shorts web pages.
+ * Eliminates false positives from regular YouTube videos, search results, and browser UI.
  */
 public class EdgeShortsAccessibilityService extends AccessibilityService {
 
@@ -142,7 +142,6 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
             lastSeenPackage = pkg.toString();
         }
 
-        // Never inspect our own application UI
         if (getPackageName().equals(lastSeenPackage)) {
             return;
         }
@@ -270,6 +269,14 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
         List<String> channelHandles = new ArrayList<>();
         collectNodesRecursively(root, foundDomIds, visibleCaptions, channelHandles, 0, 25);
 
+        // Check if we are in regular video or search result page (not in Shorts player)
+        if (!isInsideShortsPlayer(urlBarRawText, channelHandles, visibleCaptions)) {
+            if (currentVideoId != null) {
+                finalizeCurrentSession("Left Shorts player (Navigated to regular video / feed)");
+            }
+            return;
+        }
+
         // 3. Strict Verification for Shorts:
         // Case A: Specific Video ID found in DOM (e.g. youtube.com/shorts/{id})
         if (!foundDomIds.isEmpty()) {
@@ -280,7 +287,7 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
             return;
         }
 
-        // Case B: Creator Handle (@channel) found inside Shorts player (eliminates random web popups)
+        // Case B: Creator Handle (@channel) found inside Shorts player
         if (!channelHandles.isEmpty()) {
             String activeChannel = channelHandles.get(0);
             String bestTitle = chooseBestShortTitle(visibleCaptions);
@@ -300,6 +307,34 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
         }
     }
 
+    private boolean isInsideShortsPlayer(String urlBarText, List<String> channelHandles, List<String> captions) {
+        if (urlBarText != null) {
+            String lowerUrl = urlBarText.toLowerCase();
+            // If URL bar explicitly shows watch?v= or results, it's a regular video or search page
+            if (lowerUrl.contains("/watch?v=") || lowerUrl.contains("/results") || lowerUrl.contains("/feed/")) {
+                return false;
+            }
+            if (lowerUrl.contains("/shorts/")) {
+                return true;
+            }
+        }
+
+        // If multiple distinct channels are on screen, it's a search/feed page with multiple video cards
+        Set<String> distinctChannels = new HashSet<>(channelHandles);
+        if (distinctChannels.size() > 2) {
+            return false;
+        }
+
+        // If captions contain search result metadata like "views ... ago - play Short", it's a search result snippet
+        for (String c : captions) {
+            if (c.contains("views") && (c.contains("ago") || c.contains("play Short") || c.contains("play video"))) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private String chooseBestShortTitle(List<String> captions) {
         String best = null;
         int maxScore = -1;
@@ -310,6 +345,9 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
             if (trimmed.length() < 3) continue;
             if (trimmed.equalsIgnoreCase("Search") || trimmed.equalsIgnoreCase("Tabs") || trimmed.equalsIgnoreCase("YouTube")) continue;
             if (trimmed.equalsIgnoreCase("Subscribe") || trimmed.equalsIgnoreCase("Subscribed") || trimmed.equalsIgnoreCase("Remix")) continue;
+
+            // Reject search snippet lines
+            if (trimmed.contains("views") && trimmed.contains("play Short")) continue;
 
             int score = trimmed.length();
             if (trimmed.contains("#shorts") || trimmed.contains("#Shorts")) {
@@ -349,7 +387,6 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
     }
 
     private void processCandidateText(String textStr, List<String> outIds, List<String> outCaptions, List<String> outChannels) {
-        // Match YouTube Creator Handles (e.g. @nonbirimameko, @daifukupomeranian, @chezy_pizy)
         if (textStr.startsWith("@") && textStr.length() > 1 && textStr.length() < 40 && !textStr.contains(" ") && !textStr.contains("\n")) {
             if (!outChannels.contains(textStr)) {
                 outChannels.add(textStr);
