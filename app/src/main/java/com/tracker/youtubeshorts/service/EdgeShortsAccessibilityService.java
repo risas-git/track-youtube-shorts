@@ -144,42 +144,13 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
             return;
         }
 
-        // Fast path: Check event text directly
-        checkEventTextForShorts(event);
-
-        // Debounce full window inspection (200ms)
+        // Debounce window inspection (200ms)
         if (pendingInspectionTask != null) {
             mainHandler.removeCallbacks(pendingInspectionTask);
         }
 
         pendingInspectionTask = this::inspectWindowsForShorts;
         mainHandler.postDelayed(pendingInspectionTask, 200);
-    }
-
-    private void checkEventTextForShorts(AccessibilityEvent event) {
-        if (event.getText() != null) {
-            for (CharSequence seq : event.getText()) {
-                if (seq != null) {
-                    String text = seq.toString();
-                    String matchedId = extractVideoId(text);
-                    if (matchedId != null) {
-                        lastScannedUrl = text;
-                        handleShortDetected(matchedId, null, null, text);
-                        return;
-                    }
-                }
-            }
-        }
-
-        CharSequence desc = event.getContentDescription();
-        if (desc != null) {
-            String descStr = desc.toString();
-            String matchedId = extractVideoId(descStr);
-            if (matchedId != null) {
-                lastScannedUrl = descStr;
-                handleShortDetected(matchedId, null, null, descStr);
-            }
-        }
     }
 
     private void inspectWindowsForShorts() {
@@ -214,12 +185,15 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
     }
 
     /**
-     * Traverses the node tree collecting both video IDs and visible video title text.
+     * Traverses the node tree collecting URL bar state, DOM links, and visible video titles.
      */
     private void inspectNodeTree(AccessibilityNodeInfo root) {
         if (root == null) return;
 
-        // Check if URL bar indicates we are on YouTube Shorts
+        String urlBarVideoId = null;
+        String urlBarRawText = null;
+
+        // 1. Check URL bar state
         for (String id : URL_BAR_VIEW_IDS) {
             List<AccessibilityNodeInfo> urlNodes = root.findAccessibilityNodeInfosByViewId(id);
             if (urlNodes != null && !urlNodes.isEmpty()) {
@@ -228,43 +202,56 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
                     if (text != null && text.length() > 0) {
                         String urlStr = text.toString().trim();
                         lastScannedUrl = urlStr;
+                        urlBarRawText = urlStr;
                         if (urlStr.toLowerCase().contains("youtube.com") || urlStr.toLowerCase().contains("shorts")) {
                             isInsideYouTubeShortsTab = true;
                         }
-                        String videoId = extractVideoId(urlStr);
-                        if (videoId != null) {
-                            recycleNodeList(urlNodes);
-                            handleShortDetected(videoId, null, null, urlStr);
-                            return;
+                        String vid = extractVideoId(urlStr);
+                        if (vid != null) {
+                            urlBarVideoId = vid;
+                            break;
                         }
                     }
                 }
                 recycleNodeList(urlNodes);
+                if (urlBarVideoId != null) break;
             }
         }
 
-        // Deep search across all web DOM nodes
-        List<String> foundIds = new ArrayList<>();
+        // 2. Deep search webview DOM nodes for swiped video IDs and visible captions
+        List<String> foundDomIds = new ArrayList<>();
         List<String> visibleCaptions = new ArrayList<>();
-        collectNodesRecursively(root, foundIds, visibleCaptions, 0, 20);
+        collectNodesRecursively(root, foundDomIds, visibleCaptions, 0, 20);
 
-        // If we found a specific video ID in the DOM links
-        if (!foundIds.isEmpty()) {
-            String newId = foundIds.get(0);
-            String titleHint = !visibleCaptions.isEmpty() ? visibleCaptions.get(0) : null;
-            handleShortDetected(newId, titleHint, null, "https://www.youtube.com/shorts/" + newId);
-            return;
+        // 3. Priority A: Check if a distinct video ID is present in the active DOM
+        for (String domId : foundDomIds) {
+            if (!domId.equalsIgnoreCase(urlBarVideoId) || currentVideoId == null) {
+                String titleHint = !visibleCaptions.isEmpty() ? visibleCaptions.get(0) : null;
+                handleShortDetected(domId, titleHint, null, "https://www.youtube.com/shorts/" + domId);
+                return;
+            }
         }
 
-        // If on YouTube Shorts and a new prominent caption/title appeared on screen (e.g. from swiping)
+        // 4. Priority B: Check for visible video caption / title swipe changes
         if (isInsideYouTubeShortsTab && !visibleCaptions.isEmpty()) {
             String prominentTitle = visibleCaptions.get(0);
-            if (currentTitle != null && !currentTitle.isEmpty() && !currentTitle.equalsIgnoreCase(prominentTitle) && !prominentTitle.contains("Loading")) {
-                // Detected a swipe to a new title!
-                Log.i(TAG, "Detected title swipe transition: " + currentTitle + " -> " + prominentTitle);
-                // Create a title-based session or keep timing
+
+            if (currentTitle != null && !currentTitle.isEmpty()
+                    && !currentTitle.equalsIgnoreCase(prominentTitle)
+                    && !prominentTitle.contains("Loading")
+                    && !prominentTitle.startsWith("YouTube Short (")) {
+
+                // A swipe to a new title occurred!
+                Log.i(TAG, "Detected swipe to new title: " + prominentTitle);
                 handleTitleTransition(prominentTitle);
+                return;
             }
+        }
+
+        // 5. Priority C: Initial load from URL bar if no session is active yet
+        if (currentVideoId == null && urlBarVideoId != null) {
+            String titleHint = !visibleCaptions.isEmpty() ? visibleCaptions.get(0) : null;
+            handleShortDetected(urlBarVideoId, titleHint, null, urlBarRawText);
         }
     }
 
@@ -307,8 +294,8 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
         if (text == null || text.length() < 3 || text.length() > 200) return false;
         String lower = text.toLowerCase();
         if (lower.equals("shorts") || lower.equals("home") || lower.equals("subscriptions") || lower.equals("library")) return false;
-        if (lower.contains("http://") || lower.contains("https://")) return false;
-        if (lower.equals("like") || lower.equals("dislike") || lower.equals("share") || lower.equals("comments") || lower.equals("remix")) return false;
+        if (lower.contains("http://") || lower.contains("https://") || lower.contains("youtube.com")) return false;
+        if (lower.equals("like") || lower.equals("dislike") || lower.equals("share") || lower.equals("comments") || lower.equals("remix") || lower.equals("subscribe")) return false;
         return true;
     }
 
@@ -331,7 +318,6 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
         long now = System.currentTimeMillis();
 
         if (videoId.equals(currentVideoId)) {
-            // Update title if we have a better title
             if (titleHint != null && (currentTitle == null || currentTitle.contains("Loading") || currentTitle.startsWith("YouTube Short"))) {
                 currentTitle = titleHint;
             }
@@ -373,7 +359,6 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
             finalizeCurrentSession("Swiped to new Short Title: " + newTitle);
         }
 
-        // Generate synthetic ID for title-based swipe if ID not in URL
         currentVideoId = "title_" + Math.abs(newTitle.hashCode());
         currentTitle = newTitle;
         currentChannelName = null;
@@ -409,7 +394,7 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
         Log.i(TAG, "Finalizing Short: " + finishedVideoId + " (" + durationSeconds + "s). Reason: " + reason);
 
         if (durationSeconds < MIN_WATCH_DURATION_SECONDS) {
-            Log.d(TAG, "Skipped Short under " + MIN_WATCH_DURATION_SECONDS + "s");
+            Log.d(TAG, "Skipped Short under " + MIN_WATCH_DURATION_SECONDS + "s (" + durationSeconds + "s)");
             broadcastDiagnosticUpdate();
             return;
         }
@@ -417,7 +402,6 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
         String deviceId = SupabaseConfig.getDeviceId(this);
 
         if (finishedVideoId.startsWith("title_")) {
-            // Direct save for title-detected shorts
             ShortSession session = new ShortSession(
                     finishedVideoId,
                     finishedTitle,
@@ -430,7 +414,6 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
             );
             dispatchSessionToSupabase(session);
         } else {
-            // Fetch metadata before save
             YouTubeMetadataHelper.fetchVideoMetadata(finishedVideoId, info -> {
                 String titleToSave = (info.title != null && !info.title.contains("Loading")) ? info.title : finishedTitle;
                 String channelToSave = info.channelName != null ? info.channelName : finishedChannel;
