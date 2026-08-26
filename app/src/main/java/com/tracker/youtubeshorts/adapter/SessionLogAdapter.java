@@ -41,8 +41,16 @@ public class SessionLogAdapter extends RecyclerView.Adapter<SessionLogAdapter.Lo
     }
 
     @SuppressLint("NotifyDataSetChanged")
+    public void setSessions(List<ShortSession> list) {
+        sessionList.clear();
+        if (list != null) {
+            sessionList.addAll(list);
+        }
+        notifyDataSetChanged();
+    }
+
+    @SuppressLint("NotifyDataSetChanged")
     public void addSession(ShortSession session) {
-        // Check if session with same videoId and startedAt already exists in list (to update sync status)
         for (int i = 0; i < sessionList.size(); i++) {
             ShortSession existing = sessionList.get(i);
             if (existing.getVideoId().equals(session.getVideoId()) &&
@@ -52,7 +60,7 @@ public class SessionLogAdapter extends RecyclerView.Adapter<SessionLogAdapter.Lo
                 return;
             }
         }
-        sessionList.add(0, session); // Prepend newest
+        sessionList.add(0, session);
         notifyItemInserted(0);
     }
 
@@ -121,12 +129,23 @@ public class SessionLogAdapter extends RecyclerView.Adapter<SessionLogAdapter.Lo
 
         private String formatTimeDisplay(String startIso, String endIso) {
             try {
-                String startPart = startIso.substring(startIso.indexOf('T') + 1, startIso.indexOf('.'));
-                String endPart = endIso.substring(endIso.indexOf('T') + 1, endIso.indexOf('.'));
-                return startPart + " - " + endPart + " UTC";
+                return extractTime(startIso) + " - " + extractTime(endIso) + " UTC";
             } catch (Exception e) {
-                return startIso;
+                return startIso != null ? startIso : "";
             }
+        }
+
+        private String extractTime(String iso) {
+            if (iso == null || !iso.contains("T")) return "";
+            String timePart = iso.substring(iso.indexOf('T') + 1);
+            if (timePart.contains(".")) {
+                timePart = timePart.substring(0, timePart.indexOf('.'));
+            } else if (timePart.contains("+")) {
+                timePart = timePart.substring(0, timePart.indexOf('+'));
+            } else if (timePart.contains("Z")) {
+                timePart = timePart.substring(0, timePart.indexOf('Z'));
+            }
+            return timePart;
         }
     }
 }

@@ -182,9 +182,7 @@ public class MainActivity extends AppCompatActivity {
             public void onSuccess(List<ShortSession> sessions) {
                 runOnUiThread(() -> {
                     if (sessions != null && !sessions.isEmpty()) {
-                        for (ShortSession s : sessions) {
-                            logAdapter.addSession(s);
-                        }
+                        logAdapter.setSessions(sessions);
                     }
                     updateEmptyState();
                 });
