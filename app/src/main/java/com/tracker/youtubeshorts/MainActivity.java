@@ -5,7 +5,6 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
@@ -34,6 +33,10 @@ public class MainActivity extends AppCompatActivity {
     private TextView tvServiceStatus;
     private Button btnToggleService;
 
+    private TextView tvDiagPackage;
+    private TextView tvDiagActiveShort;
+    private TextView tvDiagEvents;
+
     private TextInputEditText etSupabaseUrl;
     private TextInputEditText etSupabaseKey;
     private TextInputEditText etDeviceId;
@@ -46,6 +49,7 @@ public class MainActivity extends AppCompatActivity {
     private SessionLogAdapter logAdapter;
 
     private BroadcastReceiver sessionUpdateReceiver;
+    private BroadcastReceiver diagnosticReceiver;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -57,12 +61,17 @@ public class MainActivity extends AppCompatActivity {
         loadSavedConfig();
         setupListeners();
         registerSessionReceiver();
+        registerDiagnosticReceiver();
     }
 
     private void initViews() {
         viewStatusDot = findViewById(R.id.viewStatusDot);
         tvServiceStatus = findViewById(R.id.tvServiceStatus);
         btnToggleService = findViewById(R.id.btnToggleService);
+
+        tvDiagPackage = findViewById(R.id.tvDiagPackage);
+        tvDiagActiveShort = findViewById(R.id.tvDiagActiveShort);
+        tvDiagEvents = findViewById(R.id.tvDiagEvents);
 
         etSupabaseUrl = findViewById(R.id.etSupabaseUrl);
         etSupabaseKey = findViewById(R.id.etSupabaseKey);
@@ -218,8 +227,6 @@ public class MainActivity extends AppCompatActivity {
                 String videoId = intent.getStringExtra(EdgeShortsAccessibilityService.EXTRA_VIDEO_ID);
                 String url = intent.getStringExtra(EdgeShortsAccessibilityService.EXTRA_URL);
                 int duration = intent.getIntExtra(EdgeShortsAccessibilityService.EXTRA_DURATION, 0);
-                String startedAt = intent.getStringExtra(EdgeShortsAccessibilityService.EXTRA_STARTED_AT);
-                String endedAt = intent.getStringExtra(EdgeShortsAccessibilityService.EXTRA_ENDED_AT);
                 boolean isSynced = intent.getBooleanExtra(EdgeShortsAccessibilityService.EXTRA_SYNCED, false);
                 String error = intent.getStringExtra(EdgeShortsAccessibilityService.EXTRA_ERROR);
 
@@ -249,6 +256,42 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    @SuppressLint({"UnspecifiedRegisterReceiverFlag", "SetTextI18n"})
+    private void registerDiagnosticReceiver() {
+        diagnosticReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (intent == null) return;
+
+                String pkg = intent.getStringExtra(EdgeShortsAccessibilityService.EXTRA_DIAG_PACKAGE);
+                String activeId = intent.getStringExtra(EdgeShortsAccessibilityService.EXTRA_DIAG_ACTIVE_ID);
+                int activeSec = intent.getIntExtra(EdgeShortsAccessibilityService.EXTRA_DIAG_ACTIVE_SEC, 0);
+                long events = intent.getLongExtra(EdgeShortsAccessibilityService.EXTRA_DIAG_EVENT_COUNT, 0);
+
+                if (pkg != null) {
+                    tvDiagPackage.setText("Active App: " + pkg);
+                }
+                if (activeId != null) {
+                    if (!activeId.contains("None") && activeSec > 0) {
+                        tvDiagActiveShort.setText("Currently Tracking: " + activeId + " (" + activeSec + "s)");
+                        tvDiagActiveShort.setTextColor(ContextCompat.getColor(MainActivity.this, R.color.status_green));
+                    } else {
+                        tvDiagActiveShort.setText("Currently Tracking: " + activeId);
+                        tvDiagActiveShort.setTextColor(ContextCompat.getColor(MainActivity.this, R.color.accent));
+                    }
+                }
+                tvDiagEvents.setText("Events Inspected: " + events);
+            }
+        };
+
+        IntentFilter filter = new IntentFilter(EdgeShortsAccessibilityService.ACTION_DIAGNOSTIC_UPDATE);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(diagnosticReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(diagnosticReceiver, filter);
+        }
+    }
+
     private void updateEmptyState() {
         if (logAdapter.getItemCount() > 0) {
             tvEmptyLogs.setVisibility(View.GONE);
@@ -265,6 +308,11 @@ public class MainActivity extends AppCompatActivity {
         if (sessionUpdateReceiver != null) {
             try {
                 unregisterReceiver(sessionUpdateReceiver);
+            } catch (Exception ignored) {}
+        }
+        if (diagnosticReceiver != null) {
+            try {
+                unregisterReceiver(diagnosticReceiver);
             } catch (Exception ignored) {}
         }
     }

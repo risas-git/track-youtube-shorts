@@ -22,6 +22,9 @@ id etDeviceId
 id etSupabaseKey
 id etSupabaseUrl
 id rvSessionLogs
+id tvDiagActiveShort
+id tvDiagEvents
+id tvDiagPackage
 id tvDuration
 id tvEmptyLogs
 id tvServiceStatus

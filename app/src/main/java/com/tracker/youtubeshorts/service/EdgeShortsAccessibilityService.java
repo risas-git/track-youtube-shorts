@@ -1,6 +1,7 @@
 package com.tracker.youtubeshorts.service;
 
 import android.accessibilityservice.AccessibilityService;
+import android.accessibilityservice.AccessibilityServiceInfo;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -10,6 +11,7 @@ import android.os.Looper;
 import android.util.Log;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityWindowInfo;
 
 import com.tracker.youtubeshorts.model.ShortSession;
 import com.tracker.youtubeshorts.network.SupabaseClient;
@@ -23,19 +25,21 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * AccessibilityService that monitors Microsoft Edge mobile browser for YouTube Shorts URLs,
- * measures active watch duration per Short, and dispatches session events to Supabase.
+ * Enhanced AccessibilityService that monitors Microsoft Edge (and Chromium browsers)
+ * for YouTube Shorts, tracks active watch time, and sends data to Supabase.
  */
 public class EdgeShortsAccessibilityService extends AccessibilityService {
 
     private static final String TAG = "EdgeShortsService";
 
-    // Supported Edge package names
-    private static final Set<String> EDGE_PACKAGES = new HashSet<>(Arrays.asList(
+    // Supported browser package names
+    private static final Set<String> TARGET_BROWSER_PACKAGES = new HashSet<>(Arrays.asList(
             "com.microsoft.emmx",
             "com.microsoft.emmx.canary",
             "com.microsoft.emmx.dev",
-            "com.microsoft.emmx.beta"
+            "com.microsoft.emmx.beta",
+            "com.android.chrome",
+            "com.google.android.youtube"
     ));
 
     // Common Edge/Chromium URL bar view resource IDs
@@ -43,21 +47,29 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
             "com.microsoft.emmx:id/url_bar",
             "com.microsoft.emmx:id/search_box_text",
             "com.microsoft.emmx:id/omnibox_title_text",
-            "com.microsoft.emmx:id/line_1"
+            "com.microsoft.emmx:id/line_1",
+            "com.microsoft.emmx:id/toolbar",
+            "com.android.chrome:id/url_bar",
+            "org.chromium.chrome:id/url_bar"
     };
 
-    // Regex pattern to extract YouTube Shorts video ID
-    // Matches https://youtube.com/shorts/{id}, https://m.youtube.com/shorts/{id}, youtube.com/shorts/{id}, etc.
-    private static final Pattern SHORTS_PATTERN = Pattern.compile(
-            "(?:https?://)?(?:www\\.|m\\.)?youtube\\.com/shorts/([a-zA-Z0-9_-]{11}|[a-zA-Z0-9_-]+)",
-            Pattern.CASE_INSENSITIVE
-    );
+    // Regex patterns to detect YouTube Shorts video IDs
+    private static final Pattern[] SHORTS_PATTERNS = new Pattern[]{
+            // Standard: youtube.com/shorts/{id} or m.youtube.com/shorts/{id}
+            Pattern.compile("(?:https?://)?(?:www\\.|m\\.)?youtube\\.com/shorts/([a-zA-Z0-9_-]{11}|[a-zA-Z0-9_-]+)", Pattern.CASE_INSENSITIVE),
+            // Shortened URL bar text: shorts/{id}
+            Pattern.compile("(?:^|/|\\s)shorts/([a-zA-Z0-9_-]{11})", Pattern.CASE_INSENSITIVE),
+            // Short link: youtu.be/{id}
+            Pattern.compile("youtu\\.be/([a-zA-Z0-9_-]{11})", Pattern.CASE_INSENSITIVE)
+    };
 
-    // Minimum watch duration in seconds to consider it a valid watch (filters accidental swipe-throughs)
+    // Minimum watch duration in seconds
     private static final int MIN_WATCH_DURATION_SECONDS = 2;
 
-    // Broadcast action for communicating tracked sessions to MainActivity
+    // Broadcast actions
     public static final String ACTION_SESSION_LOGGED = "com.tracker.youtubeshorts.ACTION_SESSION_LOGGED";
+    public static final String ACTION_DIAGNOSTIC_UPDATE = "com.tracker.youtubeshorts.ACTION_DIAGNOSTIC_UPDATE";
+
     public static final String EXTRA_VIDEO_ID = "extra_video_id";
     public static final String EXTRA_URL = "extra_url";
     public static final String EXTRA_DURATION = "extra_duration";
@@ -66,16 +78,24 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
     public static final String EXTRA_SYNCED = "extra_synced";
     public static final String EXTRA_ERROR = "extra_error";
 
+    public static final String EXTRA_DIAG_PACKAGE = "extra_diag_package";
+    public static final String EXTRA_DIAG_URL = "extra_diag_url";
+    public static final String EXTRA_DIAG_ACTIVE_ID = "extra_diag_active_id";
+    public static final String EXTRA_DIAG_ACTIVE_SEC = "extra_diag_active_sec";
+    public static final String EXTRA_DIAG_EVENT_COUNT = "extra_diag_event_count";
+
     // Active session state
     private String currentVideoId = null;
     private String currentFullUrl = null;
     private long sessionStartTimeMillis = 0L;
+    private long totalEventsReceived = 0;
+    private String lastSeenPackage = "None";
+    private String lastScannedUrl = "None";
 
-    // Debouncing handler to avoid heavy tree traversal on every rapid event
-    private final Handler debounceHandler = new Handler(Looper.getMainLooper());
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private Runnable pendingInspectionTask = null;
+    private Runnable liveTickerRunnable = null;
 
-    // Screen off receiver to finalize session when phone is locked
     private BroadcastReceiver screenOffReceiver;
 
     @Override
@@ -83,118 +103,190 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
         super.onCreate();
         Log.i(TAG, "EdgeShortsAccessibilityService created.");
         registerScreenReceiver();
+        startLiveTicker();
     }
 
     @Override
     protected void onServiceConnected() {
         super.onServiceConnected();
-        Log.i(TAG, "EdgeShortsAccessibilityService connected and ready to monitor Edge.");
+        Log.i(TAG, "EdgeShortsAccessibilityService connected!");
+
+        // Dynamically request enhanced web accessibility flags
+        try {
+            AccessibilityServiceInfo info = getServiceInfo();
+            if (info != null) {
+                info.flags |= AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
+                        | AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+                        | AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
+                        | AccessibilityServiceInfo.FLAG_REQUEST_ENHANCED_WEB_ACCESSIBILITY;
+                setServiceInfo(info);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Could not set enhanced flags dynamically: " + e.getMessage());
+        }
     }
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
         if (event == null) return;
 
+        totalEventsReceived++;
         CharSequence pkg = event.getPackageName();
-        String packageName = pkg != null ? pkg.toString() : "";
+        if (pkg != null) {
+            lastSeenPackage = pkg.toString();
+        }
 
-        // If user switched away from Edge to another app or home screen, finalize active Short
-        if (!EDGE_PACKAGES.contains(packageName)) {
-            if (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-                finalizeCurrentSession("User left Microsoft Edge (switched to " + packageName + ")");
+        // If user left browser completely, finalize active Short
+        if (!TARGET_BROWSER_PACKAGES.contains(lastSeenPackage)) {
+            if (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && currentVideoId != null) {
+                finalizeCurrentSession("Switched away from browser to: " + lastSeenPackage);
             }
             return;
         }
 
-        // Debounce event processing to 300ms to preserve battery and CPU
+        // Check text/contentDescription directly on event
+        checkEventTextForShorts(event);
+
+        // Debounce active window inspection (250ms)
         if (pendingInspectionTask != null) {
-            debounceHandler.removeCallbacks(pendingInspectionTask);
+            mainHandler.removeCallbacks(pendingInspectionTask);
         }
 
-        pendingInspectionTask = () -> inspectActiveWindow();
-        debounceHandler.postDelayed(pendingInspectionTask, 300);
+        pendingInspectionTask = this::inspectWindowsForShorts;
+        mainHandler.postDelayed(pendingInspectionTask, 250);
     }
 
-    /**
-     * Inspects the active window hierarchy to extract the current URL from Edge.
-     */
-    private void inspectActiveWindow() {
-        AccessibilityNodeInfo rootNode = getRootInActiveWindow();
-        if (rootNode == null) return;
-
-        try {
-            String detectedUrl = extractUrlFromNodeTree(rootNode);
-
-            if (detectedUrl != null && !detectedUrl.isEmpty()) {
-                Matcher matcher = SHORTS_PATTERN.matcher(detectedUrl);
-                if (matcher.find()) {
-                    String videoId = matcher.group(1);
-                    handleShortDetected(videoId, detectedUrl);
-                    return;
+    private void checkEventTextForShorts(AccessibilityEvent event) {
+        if (event.getText() != null) {
+            for (CharSequence seq : event.getText()) {
+                if (seq != null) {
+                    String text = seq.toString();
+                    String matchedId = extractVideoId(text);
+                    if (matchedId != null) {
+                        lastScannedUrl = text;
+                        handleShortDetected(matchedId, text);
+                        return;
+                    }
                 }
             }
+        }
 
-            // If we detected a valid URL that is NOT a YouTube Short, finalize active short session
-            if (detectedUrl != null && !detectedUrl.isEmpty() && currentVideoId != null) {
-                finalizeCurrentSession("Navigated away from YouTube Shorts to: " + detectedUrl);
+        CharSequence desc = event.getContentDescription();
+        if (desc != null) {
+            String descStr = desc.toString();
+            String matchedId = extractVideoId(descStr);
+            if (matchedId != null) {
+                lastScannedUrl = descStr;
+                handleShortDetected(matchedId, descStr);
             }
-
-        } finally {
-            rootNode.recycle();
         }
     }
 
     /**
-     * Extracts URL text from Edge by trying known resource IDs first, then falling back to recursive scan.
+     * Inspects active window and all interactive windows.
      */
-    private String extractUrlFromNodeTree(AccessibilityNodeInfo rootNode) {
-        // Strategy 1: Search by known resource IDs
-        for (String viewId : URL_BAR_VIEW_IDS) {
-            List<AccessibilityNodeInfo> nodes = rootNode.findAccessibilityNodeInfosByViewId(viewId);
+    private void inspectWindowsForShorts() {
+        boolean foundInActive = false;
+
+        // Try primary root in active window
+        AccessibilityNodeInfo rootNode = getRootInActiveWindow();
+        if (rootNode != null) {
+            try {
+                String detected = extractShortsFromNodeTree(rootNode);
+                if (detected != null) {
+                    foundInActive = true;
+                }
+            } finally {
+                rootNode.recycle();
+            }
+        }
+
+        // If not found in primary window, inspect all interactive windows
+        if (!foundInActive && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+            try {
+                List<AccessibilityWindowInfo> windows = getWindows();
+                if (windows != null) {
+                    for (AccessibilityWindowInfo window : windows) {
+                        AccessibilityNodeInfo windowRoot = window.getRoot();
+                        if (windowRoot != null) {
+                            try {
+                                String detected = extractShortsFromNodeTree(windowRoot);
+                                if (detected != null) {
+                                    break;
+                                }
+                            } finally {
+                                windowRoot.recycle();
+                            }
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                Log.d(TAG, "Window inspection exception: " + e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Searches a node tree using known URL bar IDs and recursive DFS.
+     */
+    private String extractShortsFromNodeTree(AccessibilityNodeInfo root) {
+        if (root == null) return null;
+
+        // Strategy 1: Known URL bar IDs
+        for (String id : URL_BAR_VIEW_IDS) {
+            List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByViewId(id);
             if (nodes != null && !nodes.isEmpty()) {
                 for (AccessibilityNodeInfo node : nodes) {
                     CharSequence text = node.getText();
                     if (text != null && text.length() > 0) {
-                        String url = text.toString().trim();
-                        recycleNodeList(nodes);
-                        return url;
+                        String str = text.toString().trim();
+                        lastScannedUrl = str;
+                        String videoId = extractVideoId(str);
+                        if (videoId != null) {
+                            recycleNodeList(nodes);
+                            handleShortDetected(videoId, str);
+                            return str;
+                        }
                     }
                 }
                 recycleNodeList(nodes);
             }
         }
 
-        // Strategy 2: Recursive Depth-First Search for text matching youtube.com/shorts/
-        return findShortsUrlRecursively(rootNode, 0, 15);
+        // Strategy 2: Recursive DFS
+        return searchShortsRecursively(root, 0, 20);
     }
 
-    /**
-     * Recursive helper to search node tree for Shorts URL text.
-     */
-    private String findShortsUrlRecursively(AccessibilityNodeInfo node, int depth, int maxDepth) {
+    private String searchShortsRecursively(AccessibilityNodeInfo node, int depth, int maxDepth) {
         if (node == null || depth > maxDepth) return null;
 
         CharSequence text = node.getText();
         if (text != null) {
-            String textStr = text.toString();
-            if (SHORTS_PATTERN.matcher(textStr).find()) {
-                return textStr;
+            String str = text.toString();
+            String videoId = extractVideoId(str);
+            if (videoId != null) {
+                lastScannedUrl = str;
+                handleShortDetected(videoId, str);
+                return str;
             }
         }
 
-        CharSequence contentDesc = node.getContentDescription();
-        if (contentDesc != null) {
-            String descStr = contentDesc.toString();
-            if (SHORTS_PATTERN.matcher(descStr).find()) {
-                return descStr;
+        CharSequence desc = node.getContentDescription();
+        if (desc != null) {
+            String str = desc.toString();
+            String videoId = extractVideoId(str);
+            if (videoId != null) {
+                lastScannedUrl = str;
+                handleShortDetected(videoId, str);
+                return str;
             }
         }
 
-        int childCount = node.getChildCount();
-        for (int i = 0; i < childCount; i++) {
+        int count = node.getChildCount();
+        for (int i = 0; i < count; i++) {
             AccessibilityNodeInfo child = node.getChild(i);
             if (child != null) {
-                String found = findShortsUrlRecursively(child, depth + 1, maxDepth);
+                String found = searchShortsRecursively(child, depth + 1, maxDepth);
                 child.recycle();
                 if (found != null) {
                     return found;
@@ -206,32 +298,43 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
     }
 
     /**
-     * Handles state transitions when a YouTube Short is detected.
+     * Matches raw text against all Shorts patterns to extract Video ID.
      */
+    private String extractVideoId(String text) {
+        if (text == null || text.isEmpty()) return null;
+
+        for (Pattern pattern : SHORTS_PATTERNS) {
+            Matcher m = pattern.matcher(text);
+            if (m.find()) {
+                String id = m.group(1);
+                if (id != null && !id.equalsIgnoreCase("shorts") && id.length() >= 4) {
+                    return id;
+                }
+            }
+        }
+        return null;
+    }
+
     private void handleShortDetected(String videoId, String rawUrl) {
         long now = System.currentTimeMillis();
 
-        // If same Short is still playing, keep timer running
         if (videoId.equals(currentVideoId)) {
             return;
         }
 
-        // New short detected! First, finalize previous session if one was active
+        // Finalize previous Short if active
         if (currentVideoId != null) {
-            finalizeCurrentSession("Swiped/navigated to new Short: " + videoId);
+            finalizeCurrentSession("Swiped to next Short: " + videoId);
         }
 
-        // Start tracking new Short
         currentVideoId = videoId;
         currentFullUrl = normalizeShortsUrl(videoId, rawUrl);
         sessionStartTimeMillis = now;
 
-        Log.i(TAG, "Started tracking YouTube Short: " + videoId + " (" + currentFullUrl + ")");
+        Log.i(TAG, ">>> TRACKING SHORT: " + videoId + " (" + currentFullUrl + ")");
+        broadcastDiagnosticUpdate();
     }
 
-    /**
-     * Finalizes the current Short session, calculates watch duration, and uploads to Supabase.
-     */
     private synchronized void finalizeCurrentSession(String reason) {
         if (currentVideoId == null || sessionStartTimeMillis == 0) {
             return;
@@ -245,16 +348,15 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
         String finishedUrl = currentFullUrl;
         long startTimeMillis = sessionStartTimeMillis;
 
-        // Reset state immediately to prevent duplicate finalization
         currentVideoId = null;
         currentFullUrl = null;
         sessionStartTimeMillis = 0L;
 
-        Log.d(TAG, "Finalizing session for " + finishedVideoId + " (" + durationSeconds + "s). Reason: " + reason);
+        Log.i(TAG, "Finalizing Short: " + finishedVideoId + " (" + durationSeconds + "s). Reason: " + reason);
 
-        // Filter out accidental swipes or instant skips (< 2s)
         if (durationSeconds < MIN_WATCH_DURATION_SECONDS) {
-            Log.d(TAG, "Ignoring Short session < " + MIN_WATCH_DURATION_SECONDS + "s (" + durationSeconds + "s)");
+            Log.d(TAG, "Skipped Short under " + MIN_WATCH_DURATION_SECONDS + "s");
+            broadcastDiagnosticUpdate();
             return;
         }
 
@@ -268,7 +370,7 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
                 deviceId
         );
 
-        // Dispatch to Supabase via OkHttp PostgREST API
+        // Upload to Supabase
         SupabaseClient.getInstance().insertShortSession(this, session, new SupabaseClient.ApiCallback() {
             @Override
             public void onSuccess(String responseBody) {
@@ -281,13 +383,11 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
             }
         });
 
-        // Broadcast immediate local update
-        broadcastSessionLogged(session, false, "Syncing to Supabase...");
+        // Broadcast local update
+        broadcastSessionLogged(session, false, "Uploading to Supabase...");
+        broadcastDiagnosticUpdate();
     }
 
-    /**
-     * Sends local broadcast to notify MainActivity UI of the newly logged session.
-     */
     private void broadcastSessionLogged(ShortSession session, boolean synced, String errorMsg) {
         Intent intent = new Intent(ACTION_SESSION_LOGGED);
         intent.putExtra(EXTRA_VIDEO_ID, session.getVideoId());
@@ -299,6 +399,31 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
         intent.putExtra(EXTRA_ERROR, errorMsg);
         intent.setPackage(getPackageName());
         sendBroadcast(intent);
+    }
+
+    private void broadcastDiagnosticUpdate() {
+        Intent intent = new Intent(ACTION_DIAGNOSTIC_UPDATE);
+        intent.putExtra(EXTRA_DIAG_PACKAGE, lastSeenPackage);
+        intent.putExtra(EXTRA_DIAG_URL, lastScannedUrl);
+        intent.putExtra(EXTRA_DIAG_ACTIVE_ID, currentVideoId != null ? currentVideoId : "None (Idle)");
+        int activeSec = currentVideoId != null && sessionStartTimeMillis > 0
+                ? (int) ((System.currentTimeMillis() - sessionStartTimeMillis) / 1000)
+                : 0;
+        intent.putExtra(EXTRA_DIAG_ACTIVE_SEC, activeSec);
+        intent.putExtra(EXTRA_DIAG_EVENT_COUNT, totalEventsReceived);
+        intent.setPackage(getPackageName());
+        sendBroadcast(intent);
+    }
+
+    private void startLiveTicker() {
+        liveTickerRunnable = new Runnable() {
+            @Override
+            public void run() {
+                broadcastDiagnosticUpdate();
+                mainHandler.postDelayed(this, 1000);
+            }
+        };
+        mainHandler.postDelayed(liveTickerRunnable, 1000);
     }
 
     private String normalizeShortsUrl(String videoId, String rawUrl) {
@@ -323,32 +448,31 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
             @Override
             public void onReceive(Context context, Intent intent) {
                 if (Intent.ACTION_SCREEN_OFF.equals(intent.getAction())) {
-                    Log.d(TAG, "Screen turned off. Finalizing active Short session.");
                     finalizeCurrentSession("Device screen turned off");
                 }
             }
         };
-        IntentFilter filter = new IntentFilter(Intent.ACTION_SCREEN_OFF);
-        registerReceiver(screenOffReceiver, filter);
+        registerReceiver(screenOffReceiver, new IntentFilter(Intent.ACTION_SCREEN_OFF));
     }
 
     @Override
     public void onInterrupt() {
-        Log.w(TAG, "Accessibility Service interrupted.");
-        finalizeCurrentSession("Accessibility service interrupted");
+        finalizeCurrentSession("Accessibility Service interrupted");
     }
 
     @Override
     public void onDestroy() {
         super.onDestroy();
-        Log.i(TAG, "EdgeShortsAccessibilityService destroyed.");
-        finalizeCurrentSession("Accessibility service destroyed");
+        finalizeCurrentSession("Accessibility Service destroyed");
 
         if (screenOffReceiver != null) {
             try {
                 unregisterReceiver(screenOffReceiver);
             } catch (Exception ignored) {}
         }
-        debounceHandler.removeCallbacksAndMessages(null);
+        if (liveTickerRunnable != null) {
+            mainHandler.removeCallbacks(liveTickerRunnable);
+        }
+        mainHandler.removeCallbacksAndMessages(null);
     }
 }
