@@ -152,7 +152,7 @@ public class SupabaseClient {
             baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
         }
 
-        String endpointUrl = baseUrl + "/rest/v1/" + TABLE_NAME + "?select=*&order=started_at.desc&limit=100";
+        String endpointUrl = baseUrl + "/rest/v1/" + TABLE_NAME + "?select=*&order=started_at.desc&limit=1000";
 
         Request request = new Request.Builder()
                 .url(endpointUrl)
