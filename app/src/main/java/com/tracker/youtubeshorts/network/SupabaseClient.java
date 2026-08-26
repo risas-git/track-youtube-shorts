@@ -137,6 +137,7 @@ public class SupabaseClient {
 
     /**
      * Fetches recent Shorts history from Supabase to display in MainActivity.
+     * Increased limit to 100 so all historical sessions are loaded.
      */
     public void fetchRecentSessions(Context context, FetchListCallback callback) {
         String baseUrl = SupabaseConfig.getSupabaseUrl(context);
@@ -151,7 +152,7 @@ public class SupabaseClient {
             baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
         }
 
-        String endpointUrl = baseUrl + "/rest/v1/" + TABLE_NAME + "?select=*&order=started_at.desc&limit=25";
+        String endpointUrl = baseUrl + "/rest/v1/" + TABLE_NAME + "?select=*&order=started_at.desc&limit=100";
 
         Request request = new Request.Builder()
                 .url(endpointUrl)

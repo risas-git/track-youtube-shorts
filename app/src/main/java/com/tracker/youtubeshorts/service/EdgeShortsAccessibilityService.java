@@ -28,7 +28,8 @@ import java.util.regex.Pattern;
 
 /**
  * Universal AccessibilityService for YouTube Shorts in Microsoft Edge & Chromium browsers.
- * Tracks Shorts via video IDs, creator channel handles (@channel), and title captions.
+ * Accurately tracks YouTube Shorts via video IDs and verified creator handles (@channel).
+ * Eliminates false positives from browser menus, translation popups, and non-Shorts web pages.
  */
 public class EdgeShortsAccessibilityService extends AccessibilityService {
 
@@ -141,6 +142,7 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
             lastSeenPackage = pkg.toString();
         }
 
+        // Never inspect our own application UI
         if (getPackageName().equals(lastSeenPackage)) {
             return;
         }
@@ -268,10 +270,8 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
         List<String> channelHandles = new ArrayList<>();
         collectNodesRecursively(root, foundDomIds, visibleCaptions, channelHandles, 0, 25);
 
-        Log.d(TAG, "Inspected: pkg=" + lastSeenPackage + " | urlBarId=" + urlBarVideoId + " | domIds=" + foundDomIds + " | captions=" + visibleCaptions.size() + " | channels=" + channelHandles);
-
-        // 3. Identification Strategy:
-        // Case A: Specific Video ID found in DOM (highest accuracy)
+        // 3. Strict Verification for Shorts:
+        // Case A: Specific Video ID found in DOM (e.g. youtube.com/shorts/{id})
         if (!foundDomIds.isEmpty()) {
             String bestDomId = foundDomIds.get(0);
             String titleHint = chooseBestShortTitle(visibleCaptions);
@@ -280,7 +280,7 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
             return;
         }
 
-        // Case B: Channel handle (@channel) detected in YouTube Shorts player
+        // Case B: Creator Handle (@channel) found inside Shorts player (eliminates random web popups)
         if (!channelHandles.isEmpty()) {
             String activeChannel = channelHandles.get(0);
             String bestTitle = chooseBestShortTitle(visibleCaptions);
@@ -292,25 +292,11 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
             return;
         }
 
-        // Case C: URL Bar has video ID
+        // Case C: Explicit Shorts URL present in URL bar
         if (urlBarVideoId != null) {
             String titleHint = chooseBestShortTitle(visibleCaptions);
             String channelHint = !channelHandles.isEmpty() ? channelHandles.get(0) : null;
             handleShortDetected(urlBarVideoId, titleHint, channelHint, urlBarRawText);
-            return;
-        }
-
-        // Case D: Title caption changed while on Shorts
-        if (!visibleCaptions.isEmpty()) {
-            String bestCaption = chooseBestShortTitle(visibleCaptions);
-            if (bestCaption != null && currentTitle != null && !currentTitle.isEmpty()
-                    && !currentTitle.equalsIgnoreCase(bestCaption)
-                    && !bestCaption.contains("Loading")
-                    && !bestCaption.startsWith("YouTube Short (")) {
-
-                Log.i(TAG, "Detected swipe to new title: " + bestCaption);
-                handleTitleTransition(bestCaption, null);
-            }
         }
     }
 
@@ -327,7 +313,7 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
 
             int score = trimmed.length();
             if (trimmed.contains("#shorts") || trimmed.contains("#Shorts")) {
-                score += 50;
+                score += 100;
             }
             if (score > maxScore) {
                 maxScore = score;
@@ -363,7 +349,8 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
     }
 
     private void processCandidateText(String textStr, List<String> outIds, List<String> outCaptions, List<String> outChannels) {
-        if (textStr.startsWith("@") && textStr.length() > 1 && textStr.length() < 40) {
+        // Match YouTube Creator Handles (e.g. @nonbirimameko, @daifukupomeranian, @chezy_pizy)
+        if (textStr.startsWith("@") && textStr.length() > 1 && textStr.length() < 40 && !textStr.contains(" ") && !textStr.contains("\n")) {
             if (!outChannels.contains(textStr)) {
                 outChannels.add(textStr);
             }
@@ -391,7 +378,7 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
         if (lower.contains("http://") || lower.contains("https://") || lower.contains("youtube.com")) return false;
         if (lower.equals("like") || lower.equals("dislike") || lower.equals("share") || lower.equals("comments") || lower.equals("remix") || lower.equals("subscribe") || lower.equals("subscribed")) return false;
         if (lower.contains("seiten-paneele") || lower.contains("edge panel") || lower.contains("inprivate") || lower.equals("search or enter web address") || lower.equals("search")) return false;
-        if (lower.contains("samsung") || lower.contains("settings") || lower.contains("accessibility")) return false;
+        if (lower.contains("samsung") || lower.contains("settings") || lower.contains("accessibility") || lower.contains("tastatur") || lower.contains("übersetzung")) return false;
         return true;
     }
 
@@ -448,24 +435,6 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
             });
         }
 
-        broadcastDiagnosticUpdate();
-    }
-
-    private void handleTitleTransition(String newTitle, String newChannel) {
-        long now = System.currentTimeMillis();
-        if (newTitle == null || newTitle.equals(currentTitle)) return;
-
-        if (currentVideoId != null) {
-            finalizeCurrentSession("Swiped to new Short Title: " + newTitle);
-        }
-
-        currentVideoId = "title_" + Math.abs(newTitle.hashCode());
-        currentTitle = newTitle;
-        currentChannelName = newChannel;
-        currentFullUrl = "https://www.youtube.com/shorts/" + currentVideoId;
-        sessionStartTimeMillis = now;
-
-        Log.i(TAG, ">>> TRACKING SHORT BY TITLE: " + newTitle + (newChannel != null ? " (" + newChannel + ")" : ""));
         broadcastDiagnosticUpdate();
     }
 
