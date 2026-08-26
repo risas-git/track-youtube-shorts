@@ -4,8 +4,8 @@
     <string name="accessibility_service_description">Monitors Microsoft Edge URL bar to track YouTube Shorts viewing time and syncs data to Supabase.</string>
     
     <string name="service_status_title">Service Status</string>
-    <string name="service_enabled">Accessibility Service is ACTIVE</string>
-    <string name="service_disabled">Accessibility Service is DISABLED</string>
+    <string name="service_enabled">Background Tracker is ACTIVE (Ready)</string>
+    <string name="service_disabled">Background Tracker is DISABLED</string>
     <string name="btn_enable_service">Open Accessibility Settings</string>
     
     <string name="supabase_settings_title">Supabase Configuration</string>
@@ -15,7 +15,7 @@
     <string name="btn_save_settings">Save Settings</string>
     <string name="btn_test_connection">Test Connection</string>
     
-    <string name="live_logs_title">Live Session Activity</string>
-    <string name="btn_clear_logs">Clear Logs</string>
+    <string name="live_logs_title">Tracked YouTube Shorts</string>
+    <string name="btn_clear_logs">Refresh / Clear</string>
     <string name="no_sessions_yet">No Shorts tracked yet. Open Edge and watch a YouTube Short!</string>
 </resources>

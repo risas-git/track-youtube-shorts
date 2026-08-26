@@ -6,9 +6,12 @@ import android.util.Log;
 import androidx.annotation.NonNull;
 
 import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
 import com.tracker.youtubeshorts.model.ShortSession;
 
 import java.io.IOException;
+import java.lang.reflect.Type;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import okhttp3.Call;
@@ -36,6 +39,11 @@ public class SupabaseClient {
 
     public interface ApiCallback {
         void onSuccess(String responseBody);
+        void onFailure(String errorMessage);
+    }
+
+    public interface FetchListCallback {
+        void onSuccess(List<ShortSession> sessions);
         void onFailure(String errorMessage);
     }
 
@@ -90,7 +98,7 @@ public class SupabaseClient {
                 .addHeader("apikey", apiKey)
                 .addHeader("Authorization", "Bearer " + apiKey)
                 .addHeader("Content-Type", "application/json")
-                .addHeader("Prefer", "return=minimal") // Fast insert without returning inserted row
+                .addHeader("Prefer", "return=minimal")
                 .post(body)
                 .build();
 
@@ -122,6 +130,61 @@ public class SupabaseClient {
                         session.setSyncError(errorMsg);
                         if (callback != null) callback.onFailure(errorMsg);
                     }
+                }
+            }
+        });
+    }
+
+    /**
+     * Fetches recent Shorts history from Supabase to display in MainActivity.
+     */
+    public void fetchRecentSessions(Context context, FetchListCallback callback) {
+        String baseUrl = SupabaseConfig.getSupabaseUrl(context);
+        String apiKey = SupabaseConfig.getSupabaseKey(context);
+
+        if (!SupabaseConfig.isConfigured(context)) {
+            if (callback != null) callback.onFailure("Credentials not configured");
+            return;
+        }
+
+        if (baseUrl.endsWith("/")) {
+            baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
+        }
+
+        String endpointUrl = baseUrl + "/rest/v1/" + TABLE_NAME + "?select=*&order=started_at.desc&limit=25";
+
+        Request request = new Request.Builder()
+                .url(endpointUrl)
+                .addHeader("apikey", apiKey)
+                .addHeader("Authorization", "Bearer " + apiKey)
+                .get()
+                .build();
+
+        httpClient.newCall(request).enqueue(new Callback() {
+            @Override
+            public void onFailure(@NonNull Call call, @NonNull IOException e) {
+                if (callback != null) callback.onFailure(e.getMessage());
+            }
+
+            @Override
+            public void onResponse(@NonNull Call call, @NonNull Response response) throws IOException {
+                try (Response res = response) {
+                    if (res.isSuccessful() && res.body() != null) {
+                        String json = res.body().string();
+                        Type listType = new TypeToken<List<ShortSession>>(){}.getType();
+                        List<ShortSession> list = gson.fromJson(json, listType);
+                        if (list != null) {
+                            for (ShortSession s : list) {
+                                s.setSynced(true);
+                            }
+                        }
+                        if (callback != null) callback.onSuccess(list);
+                    } else {
+                        String body = res.body() != null ? res.body().string() : "";
+                        if (callback != null) callback.onFailure("HTTP " + res.code() + ": " + body);
+                    }
+                } catch (Exception e) {
+                    if (callback != null) callback.onFailure("Parsing error: " + e.getMessage());
                 }
             }
         });

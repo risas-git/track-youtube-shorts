@@ -27,6 +27,8 @@ import com.tracker.youtubeshorts.network.SupabaseClient;
 import com.tracker.youtubeshorts.network.SupabaseConfig;
 import com.tracker.youtubeshorts.service.EdgeShortsAccessibilityService;
 
+import java.util.List;
+
 public class MainActivity extends AppCompatActivity {
 
     private View viewStatusDot;
@@ -114,13 +116,14 @@ public class MainActivity extends AppCompatActivity {
 
             SupabaseConfig.saveConfig(this, url, key, deviceId);
             Toast.makeText(this, "Supabase settings saved!", Toast.LENGTH_SHORT).show();
+            loadRecentHistory();
         });
 
         btnTestConnection.setOnClickListener(v -> testSupabaseConnection());
 
         btnClearLogs.setOnClickListener(v -> {
-            logAdapter.clear();
-            updateEmptyState();
+            loadRecentHistory();
+            Toast.makeText(this, "Refreshed logs from Supabase", Toast.LENGTH_SHORT).show();
         });
     }
 
@@ -147,6 +150,7 @@ public class MainActivity extends AppCompatActivity {
                             .setMessage("Successfully connected to Supabase PostgreSQL table!")
                             .setPositiveButton("OK", null)
                             .show();
+                    loadRecentHistory();
                 });
             }
 
@@ -169,6 +173,28 @@ public class MainActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
         updateServiceStatus();
+        loadRecentHistory();
+    }
+
+    private void loadRecentHistory() {
+        SupabaseClient.getInstance().fetchRecentSessions(this, new SupabaseClient.FetchListCallback() {
+            @Override
+            public void onSuccess(List<ShortSession> sessions) {
+                runOnUiThread(() -> {
+                    if (sessions != null && !sessions.isEmpty()) {
+                        for (ShortSession s : sessions) {
+                            logAdapter.addSession(s);
+                        }
+                    }
+                    updateEmptyState();
+                });
+            }
+
+            @Override
+            public void onFailure(String errorMessage) {
+                // Keep local logs if offline
+            }
+        });
     }
 
     private void updateServiceStatus() {
