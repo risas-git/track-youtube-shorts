@@ -65,6 +65,8 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
             Pattern.compile("[?&]v=([a-zA-Z0-9_-]{11})", Pattern.CASE_INSENSITIVE)
     };
 
+    private static final Pattern TIME_PATTERN = Pattern.compile("^\\d{1,2}:\\d{2}(?::\\d{2})?$");
+
     private static final int MIN_WATCH_DURATION_SECONDS = 2;
 
     public static final String ACTION_SESSION_LOGGED = "com.tracker.youtubeshorts.ACTION_SESSION_LOGGED";
@@ -136,18 +138,23 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
     public void onAccessibilityEvent(AccessibilityEvent event) {
         if (event == null) return;
 
-        totalEventsReceived++;
         CharSequence pkg = event.getPackageName();
         if (pkg != null) {
             lastSeenPackage = pkg.toString();
         }
 
+        // NEVER track our own app UI!
+        if (getPackageName().equals(lastSeenPackage)) {
+            return;
+        }
+
+        totalEventsReceived++;
         boolean isTarget = isTargetPackage(lastSeenPackage);
 
         // If user left browser/YouTube app, finalize active Short
         if (!isTarget) {
             if (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && currentVideoId != null) {
-                finalizeCurrentSession("Switched away from browser to: " + lastSeenPackage);
+                finalizeCurrentSession("Switched away from target to: " + lastSeenPackage);
             }
             return;
         }
@@ -165,7 +172,7 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
     }
 
     private boolean isTargetPackage(String pkg) {
-        if (pkg == null) return false;
+        if (pkg == null || getPackageName().equals(pkg)) return false;
         String lower = pkg.toLowerCase();
         if (TARGET_PACKAGES.contains(pkg)) return true;
         return lower.contains("emmx") || lower.contains("chrome") || lower.contains("browser") || lower.contains("youtube");
@@ -231,6 +238,11 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
     private void inspectNodeTree(AccessibilityNodeInfo root) {
         if (root == null) return;
 
+        CharSequence rootPkg = root.getPackageName();
+        if (rootPkg != null && getPackageName().contentEquals(rootPkg)) {
+            return; // Skip inspecting our own app windows
+        }
+
         String urlBarVideoId = null;
         String urlBarRawText = null;
 
@@ -262,82 +274,108 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
         // 2. Deep search webview DOM nodes for swiped video IDs and visible captions
         List<String> foundDomIds = new ArrayList<>();
         List<String> visibleCaptions = new ArrayList<>();
-        collectNodesRecursively(root, foundDomIds, visibleCaptions, 0, 20);
+        List<String> channelHandles = new ArrayList<>();
+        collectNodesRecursively(root, foundDomIds, visibleCaptions, channelHandles, 0, 25);
 
-        Log.d(TAG, "Inspected: pkg=" + lastSeenPackage + " | urlBarId=" + urlBarVideoId + " | domIds=" + foundDomIds.size() + " | captions=" + visibleCaptions.size());
+        Log.d(TAG, "Inspected: pkg=" + lastSeenPackage + " | urlBarId=" + urlBarVideoId + " | domIds=" + foundDomIds + " | captions=" + visibleCaptions.size() + " | channels=" + channelHandles);
 
         // 3. Priority A: Check if a distinct video ID is present in the active DOM
         for (String domId : foundDomIds) {
-            if (!domId.equalsIgnoreCase(urlBarVideoId) || currentVideoId == null) {
+            if (!domId.equalsIgnoreCase(currentVideoId)) {
                 String titleHint = !visibleCaptions.isEmpty() ? visibleCaptions.get(0) : null;
-                handleShortDetected(domId, titleHint, null, "https://www.youtube.com/shorts/" + domId);
+                String channelHint = !channelHandles.isEmpty() ? channelHandles.get(0) : null;
+                handleShortDetected(domId, titleHint, channelHint, "https://www.youtube.com/shorts/" + domId);
                 return;
             }
         }
 
         // 4. Priority B: Check for visible video caption / title swipe changes
         if (isInsideYouTubeShortsTab && !visibleCaptions.isEmpty()) {
-            String prominentTitle = visibleCaptions.get(0);
+            // Find the best caption (the longest descriptive title that isn't a UI label)
+            String bestCaption = chooseBestShortTitle(visibleCaptions);
+            String bestChannel = !channelHandles.isEmpty() ? channelHandles.get(0) : null;
 
-            if (currentTitle != null && !currentTitle.isEmpty()
-                    && !currentTitle.equalsIgnoreCase(prominentTitle)
-                    && !prominentTitle.contains("Loading")
-                    && !prominentTitle.startsWith("YouTube Short (")) {
+            if (bestCaption != null && currentTitle != null && !currentTitle.isEmpty()
+                    && !currentTitle.equalsIgnoreCase(bestCaption)
+                    && !bestCaption.contains("Loading")
+                    && !bestCaption.startsWith("YouTube Short (")) {
 
-                Log.i(TAG, "Detected swipe to new title: " + prominentTitle);
-                handleTitleTransition(prominentTitle);
+                Log.i(TAG, "Detected swipe to new title: " + bestCaption + " (Channel: " + bestChannel + ")");
+                handleTitleTransition(bestCaption, bestChannel);
                 return;
             }
         }
 
         // 5. Priority C: Initial load from URL bar if no session is active yet
         if (currentVideoId == null && urlBarVideoId != null) {
-            String titleHint = !visibleCaptions.isEmpty() ? visibleCaptions.get(0) : null;
-            handleShortDetected(urlBarVideoId, titleHint, null, urlBarRawText);
+            String titleHint = !visibleCaptions.isEmpty() ? chooseBestShortTitle(visibleCaptions) : null;
+            String channelHint = !channelHandles.isEmpty() ? channelHandles.get(0) : null;
+            handleShortDetected(urlBarVideoId, titleHint, channelHint, urlBarRawText);
         }
     }
 
-    private void collectNodesRecursively(AccessibilityNodeInfo node, List<String> outIds, List<String> outCaptions, int depth, int maxDepth) {
+    private String chooseBestShortTitle(List<String> captions) {
+        for (String c : captions) {
+            if (c.length() >= 5 && !c.equalsIgnoreCase("Search") && !c.equalsIgnoreCase("Tabs") && !c.equalsIgnoreCase("YouTube")) {
+                return c;
+            }
+        }
+        return !captions.isEmpty() ? captions.get(0) : null;
+    }
+
+    private void collectNodesRecursively(AccessibilityNodeInfo node, List<String> outIds, List<String> outCaptions, List<String> outChannels, int depth, int maxDepth) {
         if (node == null || depth > maxDepth) return;
 
         CharSequence text = node.getText();
         if (text != null && text.length() > 0) {
             String textStr = text.toString().trim();
-            String vid = extractVideoId(textStr);
-            if (vid != null) {
-                outIds.add(vid);
-            } else if (isValidShortTitle(textStr)) {
-                outCaptions.add(textStr);
-            }
+            processCandidateText(textStr, outIds, outCaptions, outChannels);
         }
 
         CharSequence desc = node.getContentDescription();
         if (desc != null && desc.length() > 0) {
             String descStr = desc.toString().trim();
-            String vid = extractVideoId(descStr);
-            if (vid != null) {
-                outIds.add(vid);
-            } else if (isValidShortTitle(descStr)) {
-                outCaptions.add(descStr);
-            }
+            processCandidateText(descStr, outIds, outCaptions, outChannels);
         }
 
         int count = node.getChildCount();
         for (int i = 0; i < count; i++) {
             AccessibilityNodeInfo child = node.getChild(i);
             if (child != null) {
-                collectNodesRecursively(child, outIds, outCaptions, depth + 1, maxDepth);
+                collectNodesRecursively(child, outIds, outCaptions, outChannels, depth + 1, maxDepth);
                 child.recycle();
+            }
+        }
+    }
+
+    private void processCandidateText(String textStr, List<String> outIds, List<String> outCaptions, List<String> outChannels) {
+        if (textStr.startsWith("@") && textStr.length() > 1 && textStr.length() < 40) {
+            outChannels.add(textStr);
+            return;
+        }
+
+        String vid = extractVideoId(textStr);
+        if (vid != null) {
+            if (!outIds.contains(vid)) {
+                outIds.add(vid);
+            }
+        } else if (isValidShortTitle(textStr)) {
+            if (!outCaptions.contains(textStr)) {
+                outCaptions.add(textStr);
             }
         }
     }
 
     private boolean isValidShortTitle(String text) {
         if (text == null || text.length() < 3 || text.length() > 200) return false;
+        if (TIME_PATTERN.matcher(text).matches()) return false;
+
         String lower = text.toLowerCase();
-        if (lower.equals("shorts") || lower.equals("home") || lower.equals("subscriptions") || lower.equals("library")) return false;
+        if (lower.equals("shorts") || lower.equals("home") || lower.equals("subscriptions") || lower.equals("library") || lower.equals("tabs")) return false;
         if (lower.contains("http://") || lower.contains("https://") || lower.contains("youtube.com")) return false;
-        if (lower.equals("like") || lower.equals("dislike") || lower.equals("share") || lower.equals("comments") || lower.equals("remix") || lower.equals("subscribe")) return false;
+        if (lower.equals("like") || lower.equals("dislike") || lower.equals("share") || lower.equals("comments") || lower.equals("remix") || lower.equals("subscribe") || lower.equals("subscribed")) return false;
+        if (lower.contains("seiten-paneele") || lower.contains("edge panel") || lower.contains("inprivate") || lower.equals("search or enter web address") || lower.equals("search")) return false;
+        if (lower.contains("samsung") || lower.contains("settings") || lower.contains("accessibility")) return false;
         return true;
     }
 
@@ -362,6 +400,9 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
         if (videoId.equals(currentVideoId)) {
             if (titleHint != null && (currentTitle == null || currentTitle.contains("Loading") || currentTitle.startsWith("YouTube Short"))) {
                 currentTitle = titleHint;
+            }
+            if (channelHint != null && currentChannelName == null) {
+                currentChannelName = channelHint;
             }
             return;
         }
@@ -394,7 +435,7 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
         broadcastDiagnosticUpdate();
     }
 
-    private void handleTitleTransition(String newTitle) {
+    private void handleTitleTransition(String newTitle, String newChannel) {
         long now = System.currentTimeMillis();
         if (newTitle == null || newTitle.equals(currentTitle)) return;
 
@@ -404,11 +445,11 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
 
         currentVideoId = "title_" + Math.abs(newTitle.hashCode());
         currentTitle = newTitle;
-        currentChannelName = null;
+        currentChannelName = newChannel;
         currentFullUrl = "https://www.youtube.com/shorts/" + currentVideoId;
         sessionStartTimeMillis = now;
 
-        Log.i(TAG, ">>> TRACKING SHORT BY TITLE: " + newTitle);
+        Log.i(TAG, ">>> TRACKING SHORT BY TITLE: " + newTitle + (newChannel != null ? " (" + newChannel + ")" : ""));
         broadcastDiagnosticUpdate();
     }
 
