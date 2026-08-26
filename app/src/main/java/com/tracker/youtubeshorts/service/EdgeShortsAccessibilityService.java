@@ -27,19 +27,23 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * High-accuracy AccessibilityService for YouTube Shorts in Microsoft Edge & Chromium browsers.
- * Detects URL bar changes, DOM link changes, and video title swipe transitions.
+ * Universal AccessibilityService that monitors Microsoft Edge, Samsung Internet, Chrome,
+ * and YouTube for Shorts, logs every Short session, and streams data to Supabase.
  */
 public class EdgeShortsAccessibilityService extends AccessibilityService {
 
     private static final String TAG = "EdgeShortsService";
 
-    private static final Set<String> TARGET_BROWSER_PACKAGES = new HashSet<>(Arrays.asList(
+    // Supported browser and video packages
+    private static final Set<String> TARGET_PACKAGES = new HashSet<>(Arrays.asList(
             "com.microsoft.emmx",
             "com.microsoft.emmx.canary",
             "com.microsoft.emmx.dev",
             "com.microsoft.emmx.beta",
+            "com.microsoft.bing",
+            "com.microsoft.copilot",
             "com.android.chrome",
+            "com.sec.android.app.sbrowser",
             "com.google.android.youtube"
     ));
 
@@ -50,7 +54,8 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
             "com.microsoft.emmx:id/line_1",
             "com.microsoft.emmx:id/toolbar",
             "com.android.chrome:id/url_bar",
-            "org.chromium.chrome:id/url_bar"
+            "org.chromium.chrome:id/url_bar",
+            "com.sec.android.app.sbrowser:id/location_bar_edit_text"
     };
 
     private static final Pattern[] VIDEO_ID_PATTERNS = new Pattern[]{
@@ -115,6 +120,7 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
         try {
             AccessibilityServiceInfo info = getServiceInfo();
             if (info != null) {
+                info.eventTypes = AccessibilityEvent.TYPES_ALL_MASK;
                 info.flags |= AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
                         | AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
                         | AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
@@ -136,13 +142,18 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
             lastSeenPackage = pkg.toString();
         }
 
-        // If user left browser completely, finalize active Short
-        if (!TARGET_BROWSER_PACKAGES.contains(lastSeenPackage)) {
+        boolean isTarget = isTargetPackage(lastSeenPackage);
+
+        // If user left browser/YouTube app, finalize active Short
+        if (!isTarget) {
             if (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && currentVideoId != null) {
                 finalizeCurrentSession("Switched away from browser to: " + lastSeenPackage);
             }
             return;
         }
+
+        // Check text / contentDescription directly on event
+        checkEventTextForShorts(event);
 
         // Debounce window inspection (200ms)
         if (pendingInspectionTask != null) {
@@ -151,6 +162,39 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
 
         pendingInspectionTask = this::inspectWindowsForShorts;
         mainHandler.postDelayed(pendingInspectionTask, 200);
+    }
+
+    private boolean isTargetPackage(String pkg) {
+        if (pkg == null) return false;
+        String lower = pkg.toLowerCase();
+        if (TARGET_PACKAGES.contains(pkg)) return true;
+        return lower.contains("emmx") || lower.contains("chrome") || lower.contains("browser") || lower.contains("youtube");
+    }
+
+    private void checkEventTextForShorts(AccessibilityEvent event) {
+        if (event.getText() != null) {
+            for (CharSequence seq : event.getText()) {
+                if (seq != null) {
+                    String text = seq.toString();
+                    String matchedId = extractVideoId(text);
+                    if (matchedId != null) {
+                        lastScannedUrl = text;
+                        handleShortDetected(matchedId, null, null, text);
+                        return;
+                    }
+                }
+            }
+        }
+
+        CharSequence desc = event.getContentDescription();
+        if (desc != null) {
+            String descStr = desc.toString();
+            String matchedId = extractVideoId(descStr);
+            if (matchedId != null) {
+                lastScannedUrl = descStr;
+                handleShortDetected(matchedId, null, null, descStr);
+            }
+        }
     }
 
     private void inspectWindowsForShorts() {
@@ -184,9 +228,6 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
         }
     }
 
-    /**
-     * Traverses the node tree collecting URL bar state, DOM links, and visible video titles.
-     */
     private void inspectNodeTree(AccessibilityNodeInfo root) {
         if (root == null) return;
 
@@ -223,6 +264,8 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
         List<String> visibleCaptions = new ArrayList<>();
         collectNodesRecursively(root, foundDomIds, visibleCaptions, 0, 20);
 
+        Log.d(TAG, "Inspected: pkg=" + lastSeenPackage + " | urlBarId=" + urlBarVideoId + " | domIds=" + foundDomIds.size() + " | captions=" + visibleCaptions.size());
+
         // 3. Priority A: Check if a distinct video ID is present in the active DOM
         for (String domId : foundDomIds) {
             if (!domId.equalsIgnoreCase(urlBarVideoId) || currentVideoId == null) {
@@ -241,7 +284,6 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
                     && !prominentTitle.contains("Loading")
                     && !prominentTitle.startsWith("YouTube Short (")) {
 
-                // A swipe to a new title occurred!
                 Log.i(TAG, "Detected swipe to new title: " + prominentTitle);
                 handleTitleTransition(prominentTitle);
                 return;
@@ -344,6 +386,7 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
             if (videoId.equals(currentVideoId)) {
                 currentTitle = info.title;
                 currentChannelName = info.channelName;
+                Log.i(TAG, ">>> TITLE RESOLVED: " + info.title + " by " + info.channelName);
                 broadcastDiagnosticUpdate();
             }
         });
@@ -391,7 +434,7 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
         currentFullUrl = null;
         sessionStartTimeMillis = 0L;
 
-        Log.i(TAG, "Finalizing Short: " + finishedVideoId + " (" + durationSeconds + "s). Reason: " + reason);
+        Log.i(TAG, "=== FINALIZING SHORT: " + finishedVideoId + " (" + durationSeconds + "s). Reason: " + reason);
 
         if (durationSeconds < MIN_WATCH_DURATION_SECONDS) {
             Log.d(TAG, "Skipped Short under " + MIN_WATCH_DURATION_SECONDS + "s (" + durationSeconds + "s)");
@@ -434,14 +477,17 @@ public class EdgeShortsAccessibilityService extends AccessibilityService {
     }
 
     private void dispatchSessionToSupabase(ShortSession session) {
+        Log.i(TAG, ">>> DISPATCHING TO SUPABASE: " + session.getVideoId() + " (" + session.getDurationSeconds() + "s)");
         SupabaseClient.getInstance().insertShortSession(this, session, new SupabaseClient.ApiCallback() {
             @Override
             public void onSuccess(String responseBody) {
+                Log.i(TAG, ">>> SUPABASE SYNC SUCCESS for " + session.getVideoId());
                 broadcastSessionLogged(session, true, null);
             }
 
             @Override
             public void onFailure(String errorMessage) {
+                Log.e(TAG, ">>> SUPABASE SYNC FAILURE: " + errorMessage);
                 broadcastSessionLogged(session, false, errorMessage);
             }
         });
